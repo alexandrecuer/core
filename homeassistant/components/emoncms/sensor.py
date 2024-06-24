@@ -33,6 +33,7 @@ from homeassistant.const import (
     UnitOfPressure,
     UnitOfSoundPressure,
     UnitOfTemperature,
+    UnitOfVolume,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import template
@@ -161,6 +162,12 @@ SENSORS: dict[str | None, SensorEntityDescription] = {
         native_unit_of_measurement=UnitOfSoundPressure.DECIBEL,
         state_class=SensorStateClass.MEASUREMENT,
     ),
+    "m³": SensorEntityDescription(
+        key="volume|cubic_meter",
+        device_class=SensorDeviceClass.VOLUME,
+        native_unit_of_measurement=UnitOfVolume.CUBIC_METERS,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
 }
 
 
@@ -204,17 +211,12 @@ async def async_setup_platform(
         if sensor_names is not None:
             name = sensor_names.get(int(elem["id"]), None)
 
-        if unit := elem.get("unit"):
-            unit_of_measurement = unit
-        else:
-            unit_of_measurement = config_unit
-
         sensors.append(
             EmonCmsSensor(
                 coordinator,
                 name,
                 value_template,
-                unit_of_measurement,
+                config_unit,
                 str(sensorid),
                 idx,
             )
@@ -230,16 +232,18 @@ class EmonCmsSensor(CoordinatorEntity[EmoncmsCoordinator], SensorEntity):
         coordinator: EmoncmsCoordinator,
         name: str | None,
         value_template: template.Template | None,
-        unit_of_measurement: str | None,
+        config_unit: str | None,
         sensorid: str,
         idx: int,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self.idx = idx
+        self.config_unit = config_unit
         elem = {}
         if self.coordinator.data:
             elem = self.coordinator.data[self.idx]
+
         if name is None:
             # Suppress ID in sensor name if it's 1, since most people won't
             # have more than one EmonCMS source and it's redundant to show the
@@ -252,7 +256,20 @@ class EmonCmsSensor(CoordinatorEntity[EmoncmsCoordinator], SensorEntity):
             self._attr_name = name
         self._value_template = value_template
         self._sensorid = sensorid
+        # these extra attributes never change
+        self._attr_extra_state_attributes = {
+            ATTR_FEEDID: elem["id"],
+            ATTR_USERID: elem["userid"],
+        }
 
+        self._update_attributes(elem)
+
+    def _update_attributes(self, elem: dict[str, Any]) -> None:
+        """Update entity attributes."""
+        # unit is mandatory field in elem, equal to '' if the user hasn't fixed the unit
+        unit_of_measurement = elem["unit"]
+        if not unit_of_measurement:
+            unit_of_measurement = self.config_unit
         params = SENSORS.get(unit_of_measurement)
         if params is not None:
             self._attr_device_class = params.device_class
@@ -260,19 +277,10 @@ class EmonCmsSensor(CoordinatorEntity[EmoncmsCoordinator], SensorEntity):
             self._attr_state_class = params.state_class
         else:
             self._attr_native_unit_of_measurement = unit_of_measurement
-
-        self._update_attributes(elem)
-
-    def _update_attributes(self, elem: dict[str, Any]) -> None:
-        """Update entity attributes."""
-        self._attr_extra_state_attributes = {
-            ATTR_FEEDID: elem["id"],
-            ATTR_TAG: elem["tag"],
-            ATTR_FEEDNAME: elem["name"],
-        }
+        self._attr_extra_state_attributes[ATTR_TAG] = elem["tag"]
+        self._attr_extra_state_attributes[ATTR_FEEDNAME] = elem["name"]
         if elem["value"] is not None:
             self._attr_extra_state_attributes[ATTR_SIZE] = elem["size"]
-            self._attr_extra_state_attributes[ATTR_USERID] = elem["userid"]
             self._attr_extra_state_attributes[ATTR_LASTUPDATETIME] = elem["time"]
             self._attr_extra_state_attributes[ATTR_LASTUPDATETIMESTR] = (
                 template.timestamp_local(float(elem["time"]))
